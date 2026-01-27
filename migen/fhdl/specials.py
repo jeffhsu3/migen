@@ -288,13 +288,18 @@ class Memory(Special):
         # simulation only
         return _MemoryLocation(self, index)
 
-    def get_port(self, write_capable=False, async_read=False,
-      has_re=False, we_granularity=0, mode=WRITE_FIRST,
+    def get_port(self,
+      write_capable=False,
+      read_capable=True, async_read=False, has_re=False,
+      we_granularity=0, mode=WRITE_FIRST,
       clock_domain="sys"):
         if we_granularity >= self.width:
             we_granularity = 0
         adr = Signal(max=self.depth)
-        dat_r = Signal(self.width)
+        if read_capable:
+            dat_r = Signal(self.width)
+        else:
+            dat_r = None
         if write_capable:
             if we_granularity:
                 we = Signal(self.width//we_granularity)
@@ -304,7 +309,7 @@ class Memory(Special):
         else:
             we = None
             dat_w = None
-        if has_re:
+        if read_capable and has_re:
             re = Signal()
         else:
             re = None
@@ -331,7 +336,7 @@ class Memory(Special):
         adr_regs = {}
         data_regs = {}
         for port in memory.ports:
-            if not port.async_read:
+            if port.dat_r is not None and not port.async_read:
                 if port.mode == WRITE_FIRST:
                     adr_reg = Signal(name_override="memadr")
                     r += "reg [" + str(adrbits-1) + ":0] " \
@@ -359,7 +364,7 @@ class Memory(Special):
                 else:
                     r += "\tif (" + gn(port.we) + ")\n"
                     r += "\t\t" + gn(memory) + "[" + gn(port.adr) + "] <= " + gn(port.dat_w) + ";\n"
-            if not port.async_read:
+            if port.dat_r is not None and not port.async_read:
                 if port.mode == WRITE_FIRST:
                     rd = "\t" + gn(adr_regs[id(port)]) + " <= " + gn(port.adr) + ";\n"
                 else:
@@ -377,6 +382,9 @@ class Memory(Special):
             r += "end\n\n"
 
         for port in memory.ports:
+            if port.dat_r is None:
+                continue
+
             if port.async_read:
                 r += "assign " + gn(port.dat_r) + " = " + gn(memory) + "[" + gn(port.adr) + "];\n"
             else:

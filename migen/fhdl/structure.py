@@ -27,7 +27,7 @@ class _Value(DUID):
     represent the integer.
     """
     def __bool__(self):
-        # Special case: Constants and Signals are part of a set or used as
+        # Special case: Constants, Signals and Slices are part of a set or used as
         # dictionary keys, and Python needs to check for equality.
         if isinstance(self, _Operator) and self.op == "==":
             a, b = self.operands
@@ -35,6 +35,18 @@ class _Value(DUID):
                 return a.value == b.value
             if isinstance(a, Signal) and isinstance(b, Signal):
                 return a is b
+            if isinstance(a, _Slice) or isinstance(b, _Slice):
+                a_start = 0
+                b_start = 0
+                if len(a) != len(b):
+                    return False
+                while isinstance(a, _Slice):
+                    a_start += a.start
+                    a = a.value
+                while isinstance(b, _Slice):
+                    b_start += b.start
+                    b = b.value
+                return (bool(a == b) and (a_start == b_start))
             if (isinstance(a, Constant) and isinstance(b, Signal)
                     or isinstance(a, Signal) and isinstance(b, Constant)):
                 return False
