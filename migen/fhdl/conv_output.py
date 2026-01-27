@@ -1,3 +1,4 @@
+import os
 from operator import itemgetter
 
 
@@ -28,8 +29,9 @@ class ConvOutput:
         return r
 
     def write(self, main_filename):
+        out_dir = os.path.dirname(os.path.abspath(main_filename))
         with open(main_filename, "w") as f:
             f.write(self.main_source)
         for filename, content in self.data_files.items():
-            with open(filename, "w") as f:
+            with open(os.path.join(out_dir, filename), "w") as f:
                 f.write(content)
