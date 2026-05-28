@@ -85,21 +85,24 @@ class MemoryToArray(ModuleTransformer):
                     sync = f.sync[port.clock.cd] = []
 
                 # read
-                if port.async_read:
-                    f.comb.append(port.dat_r.eq(storage[port.adr]))
-                else:
-                    if port.mode == WRITE_FIRST:
-                        adr_reg = Signal.like(port.adr)
-                        rd_stmt = adr_reg.eq(port.adr)
-                        f.comb.append(port.dat_r.eq(storage[adr_reg]))
-                    elif port.mode == NO_CHANGE and port.we is not None:
-                        rd_stmt = If(~port.we, port.dat_r.eq(storage[port.adr]))
-                    else: # NO_CHANGE without write capability reduces to READ_FIRST
-                        rd_stmt = port.dat_r.eq(storage[port.adr])
-                    if port.re is None:
-                        sync.append(rd_stmt)
+                # Write-only ports (read_capable=False) have no dat_r; skip
+                # generating any read logic for them.
+                if port.dat_r is not None:
+                    if port.async_read:
+                        f.comb.append(port.dat_r.eq(storage[port.adr]))
                     else:
-                        sync.append(If(port.re, rd_stmt))
+                        if port.mode == WRITE_FIRST:
+                            adr_reg = Signal.like(port.adr)
+                            rd_stmt = adr_reg.eq(port.adr)
+                            f.comb.append(port.dat_r.eq(storage[adr_reg]))
+                        elif port.mode == NO_CHANGE and port.we is not None:
+                            rd_stmt = If(~port.we, port.dat_r.eq(storage[port.adr]))
+                        else: # NO_CHANGE without write capability reduces to READ_FIRST
+                            rd_stmt = port.dat_r.eq(storage[port.adr])
+                        if port.re is None:
+                            sync.append(rd_stmt)
+                        else:
+                            sync.append(If(port.re, rd_stmt))
 
                 # write
                 if port.we is not None:
