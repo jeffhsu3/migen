@@ -795,21 +795,25 @@ class _Fragment:
     def __add__(self, other):
         newsync = _collections.defaultdict(list)
         for k, v in self.sync.items():
-            newsync[k] = v[:]
+            newsync[k] = list(v)
         for k, v in other.sync.items():
-            newsync[k].extend(v)
+            try:
+                newsync[k].extend(v)
+            except KeyError:
+                newsync[k] = list(v)
         return _Fragment(self.comb + other.comb, newsync,
             self.specials | other.specials,
             self.clock_domains + other.clock_domains)
 
     def __iadd__(self, other):
-        newsync = _collections.defaultdict(list)
-        for k, v in self.sync.items():
-            newsync[k] = v[:]
+        sync = self.sync
+        is_dd = isinstance(sync, _collections.defaultdict)
         for k, v in other.sync.items():
-            newsync[k].extend(v)
+            if not is_dd and k not in sync:
+                sync[k] = list(v)
+            else:
+                sync[k].extend(v)
         self.comb += other.comb
-        self.sync = newsync
         self.specials |= other.specials
         self.clock_domains += other.clock_domains
         return self

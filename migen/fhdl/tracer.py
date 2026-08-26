@@ -99,14 +99,25 @@ def get_obj_var_name(override=None, default=None):
     return vn
 
 name_to_idx = defaultdict(int)
+# classname -> (objs, {id(obj): index})
+# The objs list keeps references alive so ids stay unique.
 classname_to_objs = dict()
 
 
-def index_id(l, obj):
-    for n, e in enumerate(l):
-        if id(e) == id(obj):
-            return n
-    raise ValueError
+def _obj_index(classname, obj):
+    try:
+        objs, obj_ids = classname_to_objs[classname]
+    except KeyError:
+        objs, obj_ids = [], {}
+        classname_to_objs[classname] = (objs, obj_ids)
+    i = id(obj)
+    try:
+        return obj_ids[i]
+    except KeyError:
+        idx = len(objs)
+        obj_ids[i] = idx
+        objs.append(obj)
+        return idx
 
 
 def trace_back(varname=None):
@@ -139,17 +150,7 @@ def trace_back(varname=None):
                 name_to_idx[coname] += 1
         else:
             classname = obj.__class__.__name__.lower()
-            try:
-                objs = classname_to_objs[classname]
-            except KeyError:
-                classname_to_objs[classname] = [obj]
-                idx = 0
-            else:
-                try:
-                    idx = index_id(objs, obj)
-                except ValueError:
-                    idx = len(objs)
-                    objs.append(obj)
+            idx = _obj_index(classname, obj)
             classname = remove_underscore(classname)
             l.insert(0, (classname, idx))
 
