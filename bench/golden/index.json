@@ -1,0 +1,60 @@
+{
+ "arith_tree": {
+  "cycles": 120,
+  "params": {
+   "n_leaves": 16
+  },
+  "seed": 24301,
+  "trace_sha256": "810cc45a2115f559abb2849452c26ad4a9577f18d4b223c60cfd624caff1fafa",
+  "verilog_sha256": "cd23140401a3f8ee2e8277e0e82cc1cc5ca9ed9e96c45b48515c634c8c44bd9c"
+ },
+ "array_mux": {
+  "cycles": 120,
+  "params": {
+   "n_arrays": 4,
+   "n_choices": 8
+  },
+  "seed": 24301,
+  "trace_sha256": "e1771e5e34b123d686258c788573b79775d413b37b4c6126753bacbebc8da408",
+  "verilog_sha256": "44c7796a8b56fcd018cb6d7b0b712909274dd724b0071d283de0805a849e2860"
+ },
+ "fsm_chain": {
+  "cycles": 120,
+  "params": {
+   "n_stages": 4,
+   "n_states": 6
+  },
+  "seed": 24301,
+  "trace_sha256": "dec58d9ee8f26749d1253e7071f934506f104cd3f6bca39809bbcd007bccea53",
+  "verilog_sha256": "b2b0d311e4faf61efc4da4b0ecbacbfb6314de0c6e0d18fc3477beb1b591c836"
+ },
+ "many_modules": {
+  "cycles": 120,
+  "params": {
+   "n": 60
+  },
+  "seed": 24301,
+  "trace_sha256": "7b237e8f62d8db776d368d5a328315f6578270f8e5cf686458c241b9999756e9",
+  "verilog_sha256": "362ebce6a37acb45c92b2ca75092eac116f98aa25c775b52fe32ac3ae10a237b"
+ },
+ "mem_ports": {
+  "cycles": 120,
+  "params": {
+   "depth": 64,
+   "n_ports": 2,
+   "width": 32
+  },
+  "seed": 24301,
+  "trace_sha256": "7531277f427618f79b4934c86fe139d80e5a4694582532d9d5831bb5efffb0aa",
+  "verilog_sha256": "d6f8ecbbf113f605338b296f06f2f8742b2da4fb675b377a70a487d662af15c0"
+ },
+ "slice_part": {
+  "cycles": 120,
+  "params": {
+   "n": 24
+  },
+  "seed": 24301,
+  "trace_sha256": "867309c66ae4227cfa16b1b5513f9c9c5ba043b2aaea3dde1a61f758bfb33576",
+  "verilog_sha256": "e501b28d1f89d78b503196c5e9792e9ea8da7419b01658a184bf24d4ed62b99b"
+ }
+}

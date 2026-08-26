@@ -39,3 +39,13 @@ Documentation = "https://m-labs.hk/migen/manual"
 [build-system]
 requires = ["setuptools>=65.5"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["migen", "migen.build", "migen.build.platforms", "migen.build.xilinx",
+            "migen.build.altera", "migen.genlib",
+            "migen.fhdl", "migen.sim", "migen.util", "migen.test"]
+
+[tool.pytest.ini_options]
+markers = [
+    "z3: formal equivalence checks using the Z3 solver",
+]
