@@ -1,5 +1,4 @@
 import collections.abc
-from itertools import combinations
 
 from migen.util.misc import flat_iteration
 from migen.fhdl.structure import *
@@ -158,17 +157,30 @@ class Module:
             # finalize submodules created by do_finalize
             subfragments += self._collect_submodules()
             # resolve clock domain name conflicts
+            #
+            # A CD name must not appear in more than one subfragment;
+            # conflicting names are renamed to "<mod_name>_<cd_name>".
+            # This is the linear-time equivalent of comparing all pairs
+            # of subfragments.
+            name_owners = dict()
+            for fi, (mod_name, f) in enumerate(subfragments):
+                for cd in f.clock_domains:
+                    owners = name_owners.get(cd.name)
+                    if owners is None:
+                        name_owners[cd.name] = owners = dict()
+                    owners[fi] = mod_name
             needs_renaming = set()
-            for (mod_name1, f1), (mod_name2, f2) in combinations(subfragments, 2):
-                f1_names = set(cd.name for cd in f1.clock_domains)
-                f2_names = set(cd.name for cd in f2.clock_domains)
-                common_names = f1_names & f2_names
-                if common_names:
-                    if mod_name1 is None or mod_name2 is None:
-                        raise ValueError("Multiple submodules with local clock domains cannot be anonymous")
-                    if mod_name1 == mod_name2:
-                        raise ValueError("Multiple submodules with local clock domains cannot have the same name")
-                needs_renaming |= common_names
+            for name, owners in name_owners.items():
+                if len(owners) > 1:
+                    owner_names = set(owners.values())
+                    if None in owner_names:
+                        raise ValueError("Multiple submodules with local "
+                                         "clock domains cannot be anonymous")
+                    if len(owner_names) < len(owners):
+                        raise ValueError("Multiple submodules with local "
+                                         "clock domains cannot have the "
+                                         "same name")
+                    needs_renaming.add(name)
             for mod_name, f in subfragments:
                 for cd in f.clock_domains:
                     if cd.name in needs_renaming:

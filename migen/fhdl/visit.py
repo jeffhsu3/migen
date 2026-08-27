@@ -6,40 +6,62 @@ from migen.fhdl.structure import (_Operator, _Slice, _Part, _Assign, _ArrayProxy
                                   _Fragment)
 
 
+def _make_dispatch(classes):
+    return {cls: "visit_" + name for cls, name in classes.items()}
+
+
+_common_classes = {
+    Constant: "Constant",
+    Signal: "Signal",
+    ClockSignal: "ClockSignal",
+    ResetSignal: "ResetSignal",
+    _Operator: "Operator",
+    _Slice: "Slice",
+    Cat: "Cat",
+    Replicate: "Replicate",
+    _Assign: "Assign",
+    If: "If",
+    Case: "Case",
+    _Fragment: "Fragment",
+    _ArrayProxy: "ArrayProxy",
+}
+# NB: NodeVisitor deliberately does not dispatch _Part (historical
+# behaviour: it falls through to visit_unknown)
+_visitor_dispatch = _make_dispatch(_common_classes)
+_transformer_classes = dict(_common_classes)
+_transformer_classes[_Part] = "Part"
+_transformer_dispatch = _make_dispatch(_transformer_classes)
+
+
 class NodeVisitor:
+    # {exact node type: method name}; None entries mean the node is
+    # dispatched dynamically (list/tuple/dict/unknown). Subclasses of
+    # registered types resolve to their base's handler via the MRO.
+    _dispatch_table = _visitor_dispatch
+    _resolved = {}
+
+    def _resolve(self, cls):
+        for k in cls.__mro__:
+            try:
+                return self._dispatch_table[k]
+            except KeyError:
+                pass
+        return None
+
     def visit(self, node):
-        if isinstance(node, Constant):
-            self.visit_Constant(node)
-        elif isinstance(node, Signal):
-            self.visit_Signal(node)
-        elif isinstance(node, ClockSignal):
-            self.visit_ClockSignal(node)
-        elif isinstance(node, ResetSignal):
-            self.visit_ResetSignal(node)
-        elif isinstance(node, _Operator):
-            self.visit_Operator(node)
-        elif isinstance(node, _Slice):
-            self.visit_Slice(node)
-        elif isinstance(node, Cat):
-            self.visit_Cat(node)
-        elif isinstance(node, Replicate):
-            self.visit_Replicate(node)
-        elif isinstance(node, _Assign):
-            self.visit_Assign(node)
-        elif isinstance(node, If):
-            self.visit_If(node)
-        elif isinstance(node, Case):
-            self.visit_Case(node)
-        elif isinstance(node, _Fragment):
-            self.visit_Fragment(node)
-        elif isinstance(node, (list, tuple)):
-            self.visit_statements(node)
+        cls = node.__class__
+        try:
+            method_name = self._resolved[cls]
+        except KeyError:
+            method_name = self._resolved[cls] = self._resolve(cls)
+        if method_name is not None:
+            return getattr(self, method_name)(node)
+        if isinstance(node, (list, tuple)):
+            return self.visit_statements(node)
         elif isinstance(node, dict):
-            self.visit_clock_domains(node)
-        elif isinstance(node, _ArrayProxy):
-            self.visit_ArrayProxy(node)
+            return self.visit_clock_domains(node)
         else:
-            self.visit_unknown(node)
+            return self.visit_unknown(node)
 
     def visit_Constant(self, node):
         pass
@@ -112,42 +134,14 @@ class NodeVisitor:
 # - Unknown objects
 # - All fragment fields except comb and sync
 # In those cases, the original node is returned unchanged.
-class NodeTransformer:
-    def visit(self, node):
-        if isinstance(node, Constant):
-            return self.visit_Constant(node)
-        elif isinstance(node, Signal):
-            return self.visit_Signal(node)
-        elif isinstance(node, ClockSignal):
-            return self.visit_ClockSignal(node)
-        elif isinstance(node, ResetSignal):
-            return self.visit_ResetSignal(node)
-        elif isinstance(node, _Operator):
-            return self.visit_Operator(node)
-        elif isinstance(node, _Slice):
-            return self.visit_Slice(node)
-        elif isinstance(node, _Part):
-            return self.visit_Part(node)
-        elif isinstance(node, Cat):
-            return self.visit_Cat(node)
-        elif isinstance(node, Replicate):
-            return self.visit_Replicate(node)
-        elif isinstance(node, _Assign):
-            return self.visit_Assign(node)
-        elif isinstance(node, If):
-            return self.visit_If(node)
-        elif isinstance(node, Case):
-            return self.visit_Case(node)
-        elif isinstance(node, _Fragment):
-            return self.visit_Fragment(node)
-        elif isinstance(node, (list, tuple)):
-            return self.visit_statements(node)
-        elif isinstance(node, dict):
-            return self.visit_clock_domains(node)
-        elif isinstance(node, _ArrayProxy):
-            return self.visit_ArrayProxy(node)
-        else:
-            return self.visit_unknown(node)
+#
+# As an optimization, composite nodes whose children are all unchanged
+# are returned as-is instead of being rebuilt.
+class NodeTransformer(NodeVisitor):
+    _dispatch_table = _transformer_dispatch
+    # NB: separate resolution cache - the two dispatch tables differ
+    # (e.g. _Part)
+    _resolved = {}
 
     def visit_Constant(self, node):
         return node
@@ -162,54 +156,109 @@ class NodeTransformer:
         return node
 
     def visit_Operator(self, node):
-        return _Operator(node.op, [self.visit(o) for o in node.operands])
+        operands = node.operands
+        new_operands = [self.visit(o) for o in operands]
+        for old, new in zip(operands, new_operands):
+            if old is not new:
+                return _Operator(node.op, new_operands)
+        return node
 
     def visit_Slice(self, node):
-        return _Slice(self.visit(node.value), node.start, node.stop)
+        value = self.visit(node.value)
+        if value is node.value:
+            return node
+        return _Slice(value, node.start, node.stop)
 
     def visit_Part(self, node):
-        return _Part(self.visit(node.value), self.visit(node.offset), node.width)
+        value = self.visit(node.value)
+        offset = self.visit(node.offset)
+        if value is node.value and offset is node.offset:
+            return node
+        return _Part(value, offset, node.width)
 
     def visit_Cat(self, node):
-        return Cat(*[self.visit(e) for e in node.l])
+        l = node.l
+        new_l = [self.visit(e) for e in l]
+        for old, new in zip(l, new_l):
+            if old is not new:
+                return Cat(*new_l)
+        return node
 
     def visit_Replicate(self, node):
-        return Replicate(self.visit(node.v), node.n)
+        v = self.visit(node.v)
+        if v is node.v:
+            return node
+        return Replicate(v, node.n)
 
     def visit_Assign(self, node):
-        return _Assign(self.visit(node.l), self.visit(node.r))
+        l = self.visit(node.l)
+        r = self.visit(node.r)
+        if l is node.l and r is node.r:
+            return node
+        return _Assign(l, r)
 
     def visit_If(self, node):
-        r = If(self.visit(node.cond))
-        r.t = self.visit(node.t)
-        r.f = self.visit(node.f)
+        cond = self.visit(node.cond)
+        t = self.visit(node.t)
+        f = self.visit(node.f)
+        if cond is node.cond and t is node.t and f is node.f:
+            return node
+        r = If(cond)
+        r.t = t
+        r.f = f
         return r
 
     def visit_Case(self, node):
-        cases = {v: self.visit(statements)
-                 for v, statements in sorted(node.cases.items(),
-                                             key=lambda x: -1 if isinstance(x[0], str) and x[0] == "default" else x[0].duid)}
-        r = Case(self.visit(node.test), cases)
-        return r
+        test = self.visit(node.test)
+        new_cases = {}
+        changed = test is not node.test
+        for v, statements in sorted(node.cases.items(),
+                                    key=lambda x: -1 if isinstance(x[0], str) and x[0] == "default" else x[0].duid):
+            new_statements = self.visit(statements)
+            changed |= new_statements is not statements
+            new_cases[v] = new_statements
+        if not changed:
+            return node
+        return Case(test, new_cases)
 
     def visit_Fragment(self, node):
+        comb = self.visit(node.comb)
+        sync = self.visit(node.sync)
+        if comb is node.comb and sync is node.sync:
+            return node
         r = copy(node)
-        r.comb = self.visit(node.comb)
-        r.sync = self.visit(node.sync)
+        r.comb = comb
+        r.sync = sync
         return r
 
     # NOTE: this will always return a list, even if node is a tuple
     def visit_statements(self, node):
-        return [self.visit(statement) for statement in node]
+        if type(node) is not list:
+            return [self.visit(statement) for statement in node]
+        new_node = [self.visit(statement) for statement in node]
+        for old, new in zip(node, new_node):
+            if old is not new:
+                return new_node
+        return node
 
     def visit_clock_domains(self, node):
-        return {clockname: self.visit(statements)
-            for clockname, statements in sorted(node.items(),
-                                                key=itemgetter(0))}
+        new_dict = {}
+        changed = False
+        for clockname, statements in sorted(node.items(),
+                                            key=itemgetter(0)):
+            new_statements = self.visit(statements)
+            changed |= new_statements is not statements
+            new_dict[clockname] = new_statements
+        return node if not changed else new_dict
 
     def visit_ArrayProxy(self, node):
-        return _ArrayProxy([self.visit(choice) for choice in node.choices],
-            self.visit(node.key))
+        choices = node.choices
+        new_choices = [self.visit(choice) for choice in choices]
+        key = self.visit(node.key)
+        if key is node.key and all(old is new
+                                   for old, new in zip(choices, new_choices)):
+            return node
+        return _ArrayProxy(new_choices, key)
 
     def visit_unknown(self, node):
         return node

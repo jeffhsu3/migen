@@ -1,5 +1,4 @@
 from collections import OrderedDict
-from itertools import combinations
 
 from migen.fhdl.structure import *
 
@@ -11,6 +10,13 @@ class _Node:
         self.use_name = False
         self.use_number = False
         self.children = OrderedDict()
+        self._sorted_numbers = None
+        self._number_index = None
+
+    def sorted_numbers(self):
+        if self._sorted_numbers is None:
+            self._sorted_numbers = sorted(self.numbers)
+        return self._sorted_numbers
 
 
 def _display_tree(filename, tree):
@@ -59,17 +65,34 @@ def _build_tree(signals, basic_tree=None):
                 current = new
             current.numbers.add(number)
             if use_number:
-                current.all_numbers = sorted(current_b.numbers)
+                current.all_numbers = current_b.sorted_numbers()
+                idxmap = current_b._number_index
+                if idxmap is None:
+                    idxmap = current_b._number_index = dict(
+                        (n, i) for i, n in enumerate(current.all_numbers))
+                current._number_index = idxmap
             current.signal_count += 1
     return root
 
 
 def _set_use_name(node, node_name=""):
     cnames = [(k, _set_use_name(v, k)) for k, v in node.children.items()]
-    for (c1_prefix, c1_names), (c2_prefix, c2_names) in combinations(cnames, 2):
-        if not c1_names.isdisjoint(c2_names):
-            node.children[c1_prefix].use_name = True
-            node.children[c2_prefix].use_name = True
+    # A child needs its name qualified if its subtree shares any leaf
+    # name with another child. Finding shared leaves via a single map
+    # is linear in total leaf count instead of quadratic in children.
+    owners = dict()
+    for prefix, names in cnames:
+        for name in names:
+            try:
+                lst = owners[name]
+            except KeyError:
+                owners[name] = [prefix]
+            else:
+                lst.append(prefix)
+    for prefixes in owners.values():
+        if len(prefixes) > 1:
+            for prefix in prefixes:
+                node.children[prefix].use_name = True
     r = set()
     for c_prefix, c_names in cnames:
         if node.children[c_prefix].use_name:
@@ -98,7 +121,7 @@ def _name_signal(tree, signal):
         if treepos.use_name:
             elname = step_name
             if use_number:
-                elname += str(treepos.all_numbers.index(step_n))
+                elname += str(treepos._number_index[step_n])
             elements.append(elname)
     return "_".join(elements)
 
