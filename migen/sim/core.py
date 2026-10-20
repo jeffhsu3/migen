@@ -126,6 +126,10 @@ class Evaluator:
                     return operands[0] - operands[1]
             elif node.op == "m":
                 return operands[1] if operands[0] else operands[2]
+            elif node.op == "~":
+                # Python's invert is unbounded; the operator's width is the
+                # operand's, as in the emitted Verilog.
+                return _truncate(~operands[0], *value_bits_sign(node))
             else:
                 return str2op[node.op](*operands)
         elif isinstance(node, _Slice):
