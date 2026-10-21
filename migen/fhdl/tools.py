@@ -197,8 +197,14 @@ class _BasicLowerer(_Lowerer):
     def visit_ArrayProxy(self, node):
         # TODO: rewrite without variables
         array_muxed = Signal(value_bits_sign(node), variable=True)
+        # The index is read whatever context the proxy is in: an ArrayProxy
+        # nested in the key of an assignment target must be lowered as a
+        # read, not as a target of its own.
+        target_context = self.target_context
+        self.target_context = False
+        k = self.visit(node.key)
+        self.target_context = target_context
         if self.target_context:
-            k = self.visit(node.key)
             cases = {}
             for n, choice in enumerate(node.choices):
                 cases[n] = [self.visit_Assign(_Assign(choice, array_muxed))]
@@ -206,7 +212,7 @@ class _BasicLowerer(_Lowerer):
         else:
             cases = dict((n, _Assign(array_muxed, self.visit(choice)))
                 for n, choice in enumerate(node.choices))
-            self.comb.append(Case(self.visit(node.key), cases).makedefault())
+            self.comb.append(Case(k, cases).makedefault())
         return array_muxed
 
     def visit_ClockSignal(self, node):
