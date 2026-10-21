@@ -88,6 +88,61 @@ def _truncate(value, nbits, signed):
     return value
 
 
+_comparisons = {"<", "<=", "==", "!=", ">", ">="}
+
+
+def _printed_signed(node):
+    # Match the flag _printexpr uses to insert $signed({1'd0, ...}) casts.
+    # For comparisons and shifts this can differ from the actual Verilog
+    # result type, so it must be kept separate from _expression_bits_sign.
+    if isinstance(node, _Operator):
+        if node.op == "-" and len(node.operands) == 1:
+            return True
+        operands = node.operands[1:] if node.op == "m" else node.operands
+        return any(_printed_signed(o) for o in operands)
+    if isinstance(node, (_Slice, _Part, Cat, Replicate)):
+        return False
+    return _expression_bits_sign(node)[1]
+
+
+def _operand_bits_sign(operands):
+    bs = [_expression_bits_sign(o) for o in operands]
+    signs = [_printed_signed(o) for o in operands]
+    if any(signs):
+        bs = [(nbits, signed) if printed else (nbits + 1, True)
+              for (nbits, signed), printed in zip(bs, signs)]
+    return (max(nbits for nbits, signed in bs),
+            all(signed for nbits, signed in bs))
+
+
+def _expression_bits_sign(node):
+    # Width of the emitted expression, before its context widens it. Unlike
+    # value_bits_sign(), Verilog does not reserve carry/product/shift bits.
+    if isinstance(node, _Operator):
+        if node.op in _comparisons:
+            return 1, False
+        if node.op == "m":
+            operands = node.operands[1:]
+        else:
+            operands = node.operands
+        if len(operands) == 1:
+            nbits, signed = _expression_bits_sign(operands[0])
+            if node.op == "-" and not _printed_signed(operands[0]):
+                # The backend emits -$signed({1'd0, unsigned_operand}).
+                return nbits + 1, True
+            return nbits, signed
+        if node.op in {"<<<", ">>>"}:
+            return _expression_bits_sign(operands[0])
+        return _operand_bits_sign(operands)
+    elif isinstance(node, Cat):
+        return sum(_expression_bits_sign(e)[0] for e in node.l), False
+    elif isinstance(node, Replicate):
+        return _expression_bits_sign(node.v)[0] * node.n, False
+    elif isinstance(node, _MemoryLocation):
+        return node.memory.width, False
+    return value_bits_sign(node)
+
+
 class Evaluator:
     def __init__(self, clock_domains, replaced_memories):
         self.clock_domains = clock_domains
@@ -104,30 +159,72 @@ class Evaluator:
         self.modifications.clear()
         return r
 
-    def eval(self, node, postcommit=False):
+    def _eval_operand(self, node, postcommit, nbits, cast_signed,
+                      context_signed):
+        if cast_signed and not _printed_signed(node):
+            # Mixed signed/unsigned operations emit $signed({1'd0, node}).
+            # The concatenation stops the outer width reaching node.
+            nbits = _expression_bits_sign(node)[0]
+            return _truncate(self.eval(node, postcommit, 0), nbits, False)
+        return self.eval(node, postcommit, nbits, context_signed)
+
+    def eval(self, node, postcommit=False, context_width=None,
+             context_signed=None):
+        # None uses the FHDL width for a standalone simulator request;
+        # zero selects Verilog's self-determined expression width. A positive
+        # width comes from an assignment or a surrounding operator. Signedness
+        # propagates separately (an assignment's target type does not affect it).
         if isinstance(node, Constant):
-            return node.value
+            value = node.value
         elif isinstance(node, Signal):
-            if postcommit:
-                try:
-                    return self.modifications[node]
-                except KeyError:
-                    pass
-            try:
-                return self.signal_values[node]
-            except KeyError:
-                return node.reset.value
-        elif isinstance(node, _Operator):
-            operands = [self.eval(o, postcommit) for o in node.operands]
-            if node.op == "-":
-                if len(operands) == 1:
-                    return -operands[0]
-                else:
-                    return operands[0] - operands[1]
-            elif node.op == "m":
-                return operands[1] if operands[0] else operands[2]
+            if postcommit and node in self.modifications:
+                value = self.modifications[node]
             else:
-                return str2op[node.op](*operands)
+                value = self.signal_values.get(node, node.reset.value)
+        else:
+            value = None
+        if value is not None:
+            signed = node.signed and context_signed is not False
+            return _truncate(value, node.nbits, signed)
+
+        if isinstance(node, _Operator):
+            # A directly yielded value uses its FHDL width. Inside a Verilog
+            # expression, widths flow from assignments and other operands.
+            if context_width is None:
+                context_width = len(node)
+            nbits, signed = _expression_bits_sign(node)
+            cast_signed = _printed_signed(node)
+            nbits = max(nbits, context_width)
+            if context_signed is None:
+                context_signed = signed
+            if node.op in _comparisons:
+                # The result's context cannot widen the comparison operands.
+                nbits, signed = _operand_bits_sign(node.operands)
+                context_signed = signed
+            if node.op == "m":
+                condition = self.eval(node.operands[0], postcommit, 0)
+                operand = node.operands[1 if condition else 2]
+                result = self._eval_operand(
+                    operand, postcommit, nbits, cast_signed, context_signed)
+            elif node.op in {"<<<", ">>>"}:
+                left, right = node.operands
+                value = self.eval(left, postcommit, nbits, context_signed)
+                shift = _truncate(self.eval(right, postcommit, 0),
+                                  _expression_bits_sign(right)[0], False)
+                # Shifts at least as wide as the result have no remaining
+                # data bits; avoid constructing arbitrarily large integers.
+                result = str2op[node.op](value, min(shift, nbits))
+            else:
+                operands = [self._eval_operand(o, postcommit, nbits,
+                                               cast_signed, context_signed)
+                            for o in node.operands]
+                if node.op == "-" and len(operands) == 1:
+                    result = -operands[0]
+                else:
+                    result = str2op[node.op](*operands)
+            if node.op in _comparisons:
+                return int(result)
+            return _truncate(result, nbits, context_signed)
         elif isinstance(node, _Slice):
             v = self.eval(node.value, postcommit)
             idx = range(node.start, node.stop)
@@ -141,18 +238,23 @@ class Evaluator:
             shift = 0
             r = 0
             for element in node.l:
-                nbits = len(element)
+                nbits = _expression_bits_sign(element)[0]
                 # make value always positive
-                r |= (self.eval(element, postcommit) & (2**nbits-1)) << shift
+                value = self.eval(element, postcommit, 0) & (2**nbits - 1)
+                r |= value << shift
                 shift += nbits
             return r
         elif isinstance(node, Replicate):
-            nbits = len(node.v)
-            v = self.eval(node.v, postcommit) & (2**nbits - 1)
+            nbits = _expression_bits_sign(node.v)[0]
+            v = self.eval(node.v, postcommit, 0) & (2**nbits - 1)
             return sum(v << i*nbits for i in range(node.n))
         elif isinstance(node, _ArrayProxy):
             idx = min(len(node.choices) - 1, self.eval(node.key, postcommit))
-            return self.eval(node.choices[idx], postcommit)
+            nbits, signed = value_bits_sign(node)
+            if context_signed is False:
+                signed = False
+            return _truncate(self.eval(node.choices[idx], postcommit, nbits),
+                             nbits, signed)
         elif isinstance(node, _MemoryLocation):
             array = self.replaced_memories[node.memory]
             return self.eval(array[self.eval(node.index, postcommit)], postcommit)
@@ -210,18 +312,28 @@ class Evaluator:
     def execute(self, statements):
         for s in statements:
             if isinstance(s, _Assign):
-                self.assign(s.l, self.eval(s.r))
+                nbits = _expression_bits_sign(s.l)[0]
+                self.assign(s.l, self.eval(s.r, context_width=nbits))
             elif isinstance(s, If):
-                if self.eval(s.cond) & (2**len(s.cond) - 1):
+                if self.eval(s.cond, context_width=0):
                     self.execute(s.t)
                 else:
                     self.execute(s.f)
             elif isinstance(s, Case):
-                nbits, signed = value_bits_sign(s.test)
-                test = _truncate(self.eval(s.test), nbits, signed)
+                # Case items share a comparison context with the selector.
+                # Unlike binary operators, case emits no mixed-sign casts.
+                bs = [_expression_bits_sign(s.test)] + [
+                    value_bits_sign(k) for k in s.cases
+                    if isinstance(k, Constant)]
+                nbits = max(b[0] for b in bs)
+                signed = all(b[1] for b in bs)
+                test = self.eval(s.test, context_width=nbits,
+                                 context_signed=signed)
+                test = _truncate(test, nbits, signed)
                 found = False
                 for k, v in s.cases.items():
-                    if isinstance(k, Constant) and k.value == test:
+                    if (isinstance(k, Constant)
+                            and _truncate(k.value, k.nbits, signed) == test):
                         self.execute(v)
                         found = True
                         break
