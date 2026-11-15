@@ -38,15 +38,30 @@ _load_build_opcodes = {
 
 
 _MISSING = object()
-_var_name_cache = {}
-_clean_var_name_cache = {}
-_coname_cache = {}
-_code_has_self = {}
+# Keyed by id(code) because CPython 3.11+ CodeType.__hash__ materializes and
+# hashes de-quickened co_code on every lookup (expensive on large functions).
+# Storing `code` inside each entry keeps the CodeType alive so id(code) is unique.
+# Entry layout: [code, co_code_or_None, has_self, coname_or_None, raw_vns, clean_vns]
+_code_cache = {}
 _obj_tuple_cache = {}
 
 
-def _scan_var_name(code, call_index):
-    co_code = code.co_code
+def _get_code_entry(code):
+    cid = id(code)
+    entry = _code_cache.get(cid)
+    if entry is None:
+        has_self = _check_code_has_self(code)
+        coname = code.co_name
+        if coname == "<module>":
+            coname = None
+        else:
+            coname = remove_underscore(coname)
+        entry = [code, None, has_self, coname, {}, {}]
+        _code_cache[cid] = entry
+    return entry
+
+
+def _scan_var_name(code, co_code, call_index):
     while call_index > 0 and opname[co_code[call_index]] == "CACHE":
         call_index -= 2
     while True:
@@ -82,10 +97,16 @@ def _scan_var_name(code, call_index):
 
 
 def get_var_name(frame):
-    key = (frame.f_code, frame.f_lasti)
-    vn = _var_name_cache.get(key, _MISSING)
+    code = frame.f_code
+    entry = _get_code_entry(code)
+    lasti = frame.f_lasti
+    raw_vns = entry[4]
+    vn = raw_vns.get(lasti, _MISSING)
     if vn is _MISSING:
-        vn = _var_name_cache[key] = _scan_var_name(key[0], key[1])
+        co_code = entry[1]
+        if co_code is None:
+            co_code = entry[1] = code.co_code
+        vn = raw_vns[lasti] = _scan_var_name(code, co_code, lasti)
     return vn
 
 
@@ -150,15 +171,24 @@ def trace_back(varname=None):
     frame = inspect.currentframe().f_back.f_back
     while frame is not None:
         code = frame.f_code
+        entry = _code_cache.get(id(code))
+        if entry is None:
+            entry = _get_code_entry(code)
+
         if varname is None:
-            key = (code, frame.f_lasti)
-            varname = _clean_var_name_cache.get(key, _MISSING)
+            lasti = frame.f_lasti
+            clean_vns = entry[5]
+            varname = clean_vns.get(lasti, _MISSING)
             if varname is _MISSING:
-                raw_vn = _var_name_cache.get(key, _MISSING)
+                raw_vns = entry[4]
+                raw_vn = raw_vns.get(lasti, _MISSING)
                 if raw_vn is _MISSING:
-                    raw_vn = _var_name_cache[key] = _scan_var_name(code, key[1])
+                    co_code = entry[1]
+                    if co_code is None:
+                        co_code = entry[1] = code.co_code
+                    raw_vn = raw_vns[lasti] = _scan_var_name(code, co_code, lasti)
                 varname = remove_underscore(raw_vn) if raw_vn is not None else None
-                _clean_var_name_cache[key] = varname
+                clean_vns[lasti] = varname
             if varname is not None:
                 l.append((varname, name_to_idx[varname]))
                 name_to_idx[varname] += 1
@@ -167,11 +197,7 @@ def trace_back(varname=None):
             l.append((varname, name_to_idx[varname]))
             name_to_idx[varname] += 1
 
-        has_self = _code_has_self.get(code)
-        if has_self is None:
-            has_self = _code_has_self[code] = _check_code_has_self(code)
-
-        if has_self:
+        if entry[2]:
             obj = frame.f_locals.get("self")
             if obj is not None:
                 oid = id(obj)
@@ -191,16 +217,10 @@ def trace_back(varname=None):
                     continue
 
         if varname is not None:
-            coname = _coname_cache.get(code)
+            coname = entry[3]
             if coname is None:
-                coname = code.co_name
-                if coname == "<module>":
-                    modules = frame.f_globals["__name__"]
-                    coname = modules.rsplit(".", 1)[-1]
-                    coname = remove_underscore(coname)
-                else:
-                    coname = remove_underscore(coname)
-                    _coname_cache[code] = coname
+                modules = frame.f_globals["__name__"]
+                coname = remove_underscore(modules.rsplit(".", 1)[-1])
             l.append((coname, name_to_idx[coname]))
             name_to_idx[coname] += 1
 
