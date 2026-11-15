@@ -93,28 +93,33 @@ def convert_profiled(fi, ios=None, name="top", special_overrides=dict(),
     with t.span("lower specials"):
         f, lowered_specials = lower_specials(special_overrides, f)
     with t.span("lower basics 2"):
-        f = lower_basics(f)
+        if lowered_specials:
+            f = lower_basics(f)
 
     with t.span("naming"):
-        from migen.fhdl.tools import list_signals, list_special_ios
+        from migen.fhdl.tools import list_signals, list_special_ios, group_by_targets
         for io in sorted(ios, key=lambda x: x.duid):
             if io.name_override is None:
                 io_name = io.backtrace[-1][0]
                 if io_name:
                     io.name_override = io_name
-        ns = build_namespace(list_signals(f)
-                             | list_special_ios(f, True, True, True)
-                             | ios, verilog._reserved_keywords)
+        sigs = list_signals(f) | list_special_ios(f, True, True, True)
+        ns = build_namespace(sigs | ios, verilog._reserved_keywords)
+        ns.clock_domains = f.clock_domains
 
     with t.span("printing"):
-        src = "/* Machine-generated using Migen */\n"
-        src += verilog._printheader(f, ios, name, ns, DummyAttrTranslate())
-        src += verilog._printcomb(f, ns, display_run=False)
-        src += verilog._printsync(f, ns)
-        src += verilog._printspecials(special_overrides,
-                                      f.specials - lowered_specials,
-                                      ns, r.add_data_file, DummyAttrTranslate())
-        src += "endmodule\n"
+        comb_groups = group_by_targets(f.comb) if f.comb else []
+        src = "".join([
+            "/* Machine-generated using Migen */\n",
+            verilog._printheader(f, ios, name, ns, DummyAttrTranslate(),
+                                 sigs=sigs, comb_groups=comb_groups),
+            verilog._printcomb(f, ns, display_run=False, groups=comb_groups),
+            verilog._printsync(f, ns),
+            verilog._printspecials(special_overrides,
+                                   f.specials - lowered_specials,
+                                   ns, r.add_data_file, DummyAttrTranslate()),
+            "endmodule\n",
+        ])
     r.set_main_source(src)
     return r, dict(t.phases)
 

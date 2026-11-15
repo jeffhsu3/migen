@@ -1,6 +1,3 @@
-from migen.fhdl import structure as f
-
-
 __all__ = ["log2_int", "bits_for", "value_bits_sign"]
 
 
@@ -22,6 +19,9 @@ def bits_for(n, require_sign_bit=False):
     if require_sign_bit:
         r += 1
     return r
+
+
+from migen.fhdl import structure as f
 
 
 def _bitwise_binary_bits_sign(a, b):
@@ -120,3 +120,6 @@ def value_bits_sign(v):
     else:
         raise TypeError("Can not calculate bit length of {} {}".format(
             type(v), v))
+
+
+f._value_bits_sign = value_bits_sign

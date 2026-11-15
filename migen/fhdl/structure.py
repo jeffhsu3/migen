@@ -4,7 +4,10 @@ import collections as _collections
 import re as _re
 
 from migen.fhdl import tracer as _tracer
+from migen.fhdl.bitcontainer import bits_for as _bits_for
 from migen.util.misc import flat_iteration as _flat_iteration
+
+_value_bits_sign = None
 
 
 class DUID:
@@ -104,8 +107,10 @@ class _Value(DUID):
         return _Operator(">=", [self, other])
 
     def __len__(self):
-        from migen.fhdl.bitcontainer import value_bits_sign
-        return value_bits_sign(self)[0]
+        if _value_bits_sign is None:
+            from migen.fhdl.bitcontainer import value_bits_sign
+            return value_bits_sign(self)[0]
+        return _value_bits_sign(self)[0]
 
     def __getitem__(self, key):
         n = len(self)
@@ -210,6 +215,9 @@ class _Slice(_Value):
         self.start = start
         self.stop = stop
 
+    def __len__(self):
+        return self.stop - self.start
+
 
 class _Part(_Value):
     def __init__(self, value, offset, width):
@@ -223,6 +231,9 @@ class _Part(_Value):
         self.value = value
         self.offset = offset
         self.width = width
+
+    def __len__(self):
+        return self.width
 
 class Cat(_Value):
     """Concatenate values
@@ -294,18 +305,19 @@ class Constant(_Value):
         to the minimum width and signedness of `value`.
     """
     def __init__(self, value, bits_sign=None):
-        from migen.fhdl.bitcontainer import bits_for
-
         _Value.__init__(self)
 
         self.value = int(value)
         if bits_sign is None:
-            bits_sign = bits_for(self.value), self.value < 0
+            bits_sign = _bits_for(self.value), self.value < 0
         elif isinstance(bits_sign, int):
             bits_sign = bits_sign, self.value < 0
         self.nbits, self.signed = bits_sign
         if not isinstance(self.nbits, int) or self.nbits <= 0:
             raise TypeError("Width must be a strictly positive integer")
+
+    def __len__(self):
+        return self.nbits
 
     def __hash__(self):
         return self.value
@@ -368,14 +380,14 @@ class Signal(_Value):
     def __init__(self, bits_sign=None, name=None, variable=False, reset=0,
                  reset_less=False, name_override=None, min=None, max=None,
                  related=None, attr=None):
-        from migen.fhdl.bitcontainer import bits_for
-
         _Value.__init__(self)
 
-        for n in [name, name_override]:
-            if n is not None and not self._name_re.match(n):
-                raise ValueError("Signal name {} is not a valid Python identifier"
-                                 .format(repr(n)))
+        if name is not None and not self._name_re.match(name):
+            raise ValueError("Signal name {} is not a valid Python identifier"
+                             .format(repr(name)))
+        if name_override is not None and not self._name_re.match(name_override):
+            raise ValueError("Signal name {} is not a valid Python identifier"
+                             .format(repr(name_override)))
 
         # determine number of bits and signedness
         if bits_sign is None:
@@ -386,7 +398,7 @@ class Signal(_Value):
             max -= 1  # make both bounds inclusive
             assert(min < max)
             self.signed = min < 0 or max < 0
-            self.nbits = _builtins.max(bits_for(min, self.signed), bits_for(max, self.signed))
+            self.nbits = _builtins.max(_bits_for(min, self.signed), _bits_for(max, self.signed))
         else:
             assert(min is None and max is None)
             if isinstance(bits_sign, tuple):
@@ -394,27 +406,44 @@ class Signal(_Value):
             else:
                 self.nbits, self.signed = bits_sign, False
         if isinstance(reset, (bool, int)):
-            reset = Constant(reset, (self.nbits, self.signed))
+            self._reset = Constant(reset, (self.nbits, self.signed))
+            reset_wrapped = True
+        else:
+            reset_wrapped = False
         if not isinstance(self.nbits, int) or self.nbits <= 0:
             raise ValueError("Signal width must be a strictly positive integer")
         if attr is None:
             attr = set()
 
         self.variable = variable  # deprecated
-        self.reset = reset
+        if not reset_wrapped:
+            self._reset = wrap(reset)
         self.reset_less = reset_less
         self.name_override = name_override
-        self.backtrace = _tracer.trace_back(name)
+        if name_override is not None:
+            self.backtrace = [(name_override, 0)]
+            self._traced = False
+        else:
+            self.backtrace = _tracer.trace_back(name)
+            self._traced = True
         self.related = related
         self.attr = attr
 
-    def __setattr__(self, k, v):
-        if k == "reset":
-            v = wrap(v)
-        _Value.__setattr__(self, k, v)
+    @property
+    def reset(self):
+        return self._reset
+
+    @reset.setter
+    def reset(self, v):
+        self._reset = wrap(v)
+
+    def __len__(self):
+        return self.nbits
 
     def __repr__(self):
-        return "<Signal " + (self.backtrace[-1][0] or "anonymous") + " at " + hex(id(self)) + ">"
+        bt = getattr(self, "backtrace", None)
+        name = getattr(self, "name_override", None) or (bt[-1][0] if bt else None) or "anonymous"
+        return "<Signal " + name + " at " + hex(id(self)) + ">"
 
     @classmethod
     def like(cls, other, **kwargs):
@@ -740,8 +769,12 @@ class ClockDomain:
         """
         self.name = new_name
         self.clk.name_override = new_name + "_clk"
+        if not getattr(self.clk, "_traced", True):
+            self.clk.backtrace = [(self.clk.name_override, 0)]
         if self.rst is not None:
             self.rst.name_override = new_name + "_rst"
+            if not getattr(self.rst, "_traced", True):
+                self.rst.backtrace = [(self.rst.name_override, 0)]
 
 
 class _ClockDomainList(list):

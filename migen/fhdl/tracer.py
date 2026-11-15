@@ -37,30 +37,37 @@ _load_build_opcodes = {
 }
 
 
-def get_var_name(frame):
-    code = frame.f_code
-    call_index = frame.f_lasti
-    while call_index > 0 and opname[code.co_code[call_index]] == "CACHE":
+_MISSING = object()
+_var_name_cache = {}
+_clean_var_name_cache = {}
+_coname_cache = {}
+_code_has_self = {}
+_obj_tuple_cache = {}
+
+
+def _scan_var_name(code, call_index):
+    co_code = code.co_code
+    while call_index > 0 and opname[co_code[call_index]] == "CACHE":
         call_index -= 2
     while True:
-        call_opc = opname[code.co_code[call_index]]
-        if call_opc in("EXTENDED_ARG",):
+        call_opc = opname[co_code[call_index]]
+        if call_opc == "EXTENDED_ARG":
             call_index += 2
         else:
             break
     if call_opc not in _call_opcodes:
         return None
-    index = call_index+_call_opcodes[call_opc]
+    index = call_index + _call_opcodes[call_opc]
     while True:
-        opc = opname[code.co_code[index]]
+        opc = opname[co_code[index]]
         if opc == "STORE_NAME" or opc == "STORE_ATTR":
-            name_index = int(code.co_code[index+1])
+            name_index = co_code[index + 1]
             return code.co_names[name_index]
         elif opc == "STORE_FAST":
-            name_index = int(code.co_code[index+1])
+            name_index = co_code[index + 1]
             return code.co_varnames[name_index]
         elif opc == "STORE_DEREF":
-            name_index = int(code.co_code[index+1])
+            name_index = co_code[index + 1]
             if name_index < code.co_nlocals:
                 return code.co_varnames[name_index]
             name_index -= code.co_nlocals
@@ -72,6 +79,14 @@ def get_var_name(frame):
             index += _load_build_opcodes[opc]
         else:
             return None
+
+
+def get_var_name(frame):
+    key = (frame.f_code, frame.f_lasti)
+    vn = _var_name_cache.get(key, _MISSING)
+    if vn is _MISSING:
+        vn = _var_name_cache[key] = _scan_var_name(key[0], key[1])
+    return vn
 
 
 def remove_underscore(s):
@@ -120,40 +135,76 @@ def _obj_index(classname, obj):
         return idx
 
 
+def _check_code_has_self(code):
+    if not (code.co_flags & 2):
+        return True
+    return ("self" in code.co_varnames
+            or "self" in code.co_cellvars
+            or "self" in code.co_freevars)
+
+
 def trace_back(varname=None):
     l = []
+    if not classname_to_objs and _obj_tuple_cache:
+        _obj_tuple_cache.clear()
     frame = inspect.currentframe().f_back.f_back
     while frame is not None:
+        code = frame.f_code
         if varname is None:
-            varname = get_var_name(frame)
-        if varname is not None:
+            key = (code, frame.f_lasti)
+            varname = _clean_var_name_cache.get(key, _MISSING)
+            if varname is _MISSING:
+                raw_vn = _var_name_cache.get(key, _MISSING)
+                if raw_vn is _MISSING:
+                    raw_vn = _var_name_cache[key] = _scan_var_name(code, key[1])
+                varname = remove_underscore(raw_vn) if raw_vn is not None else None
+                _clean_var_name_cache[key] = varname
+            if varname is not None:
+                l.append((varname, name_to_idx[varname]))
+                name_to_idx[varname] += 1
+        else:
             varname = remove_underscore(varname)
-            l.insert(0, (varname, name_to_idx[varname]))
+            l.append((varname, name_to_idx[varname]))
             name_to_idx[varname] += 1
 
-        try:
-            obj = frame.f_locals["self"]
-        except KeyError:
-            obj = None
-        if hasattr(obj, "__del__"):
-            obj = None
+        has_self = _code_has_self.get(code)
+        if has_self is None:
+            has_self = _code_has_self[code] = _check_code_has_self(code)
 
-        if obj is None:
-            if varname is not None:
-                coname = frame.f_code.co_name
+        if has_self:
+            obj = frame.f_locals.get("self")
+            if obj is not None:
+                oid = id(obj)
+                tup = _obj_tuple_cache.get(oid)
+                if tup is None:
+                    if hasattr(obj, "__del__"):
+                        obj = None
+                    else:
+                        raw_cls = obj.__class__.__name__.lower()
+                        idx = _obj_index(raw_cls, obj)
+                        tup = (remove_underscore(raw_cls), idx)
+                        _obj_tuple_cache[oid] = tup
+                if tup is not None:
+                    l.append(tup)
+                    varname = None
+                    frame = frame.f_back
+                    continue
+
+        if varname is not None:
+            coname = _coname_cache.get(code)
+            if coname is None:
+                coname = code.co_name
                 if coname == "<module>":
                     modules = frame.f_globals["__name__"]
-                    modules = modules.split(".")
-                    coname = modules[len(modules)-1]
-                coname = remove_underscore(coname)
-                l.insert(0, (coname, name_to_idx[coname]))
-                name_to_idx[coname] += 1
-        else:
-            classname = obj.__class__.__name__.lower()
-            idx = _obj_index(classname, obj)
-            classname = remove_underscore(classname)
-            l.insert(0, (classname, idx))
+                    coname = modules.rsplit(".", 1)[-1]
+                    coname = remove_underscore(coname)
+                else:
+                    coname = remove_underscore(coname)
+                    _coname_cache[code] = coname
+            l.append((coname, name_to_idx[coname]))
+            name_to_idx[coname] += 1
 
         varname = None
         frame = frame.f_back
+    l.reverse()
     return l

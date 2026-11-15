@@ -16,7 +16,7 @@
   },
   "seed": 24301,
   "trace_sha256": "e1771e5e34b123d686258c788573b79775d413b37b4c6126753bacbebc8da408",
-  "verilog_sha256": "44c7796a8b56fcd018cb6d7b0b712909274dd724b0071d283de0805a849e2860"
+  "verilog_sha256": "dc1821f4466b174fd307f23ca7a20fada88c86ad59b5f59d409daaaa3ba62094"
  },
  "fsm_chain": {
   "cycles": 120,

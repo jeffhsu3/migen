@@ -1,3 +1,4 @@
+from copy import copy
 from migen.fhdl.structure import *
 from migen.fhdl.structure import _Slice, _Part, _Assign, _Fragment
 from migen.fhdl.visit import NodeVisitor, NodeTransformer
@@ -61,30 +62,108 @@ def list_inputs(node):
     return lister.output_list
 
 
-def _resort_statements(ol):
-    return [statement for i, statement in
-            sorted(ol, key=lambda x: x[0])]
-
-
 def group_by_targets(sl):
-    groups = []
-    seen = set()
-    for order, stmt in enumerate(flat_iteration(sl)):
-        targets = set(list_targets(stmt))
-        group = [(order, stmt)]
-        disjoint = targets.isdisjoint(seen)
-        seen |= targets
-        if not disjoint:
-            groups, old_groups = [], groups
-            for old_targets, old_group in old_groups:
-                if targets.isdisjoint(old_targets):
-                    groups.append((old_targets, old_group))
+    lister = _TargetLister()
+    group_targets = []
+    group_stmts = []
+    group_orders = []
+    needs_sort = []
+    parent = []
+    target_owner = {}
+
+    for gid, stmt in enumerate(flat_iteration(sl)):
+        if type(stmt) is _Assign and type(stmt.l) is Signal:
+            targets = {stmt.l}
+        else:
+            targets = set()
+            lister.output_list = targets
+            lister.visit(stmt)
+
+        roots = None
+        for t in targets:
+            owner = target_owner.get(t)
+            if owner is not None:
+                while parent[owner] != owner:
+                    parent[owner] = parent[parent[owner]]
+                    owner = parent[owner]
+                if roots is None:
+                    roots = {owner}
                 else:
-                    targets |= old_targets
-                    group += old_group
-        groups.append((targets, group))
-    return [(targets, _resort_statements(stmts))
-        for targets, stmts in groups]
+                    roots.add(owner)
+
+        if roots is None:
+            for t in targets:
+                target_owner[t] = gid
+            parent.append(gid)
+            group_targets.append(targets)
+            group_stmts.append([stmt])
+            group_orders.append(None)
+            needs_sort.append(False)
+        elif len(roots) == 1:
+            r = next(iter(roots))
+            merged_targets = group_targets[r]
+            merged_targets |= targets
+            for t in targets:
+                target_owner[t] = gid
+            merged_stmts = group_stmts[r]
+            merged_stmts.append(stmt)
+            orders = group_orders[r]
+            if orders is None:
+                orders = [r, gid]
+            else:
+                orders.append(gid)
+            group_targets[r] = None
+            group_stmts[r] = None
+            group_orders[r] = None
+            parent[r] = gid
+            parent.append(gid)
+            group_targets.append(merged_targets)
+            group_stmts.append(merged_stmts)
+            group_orders.append(orders)
+            needs_sort.append(needs_sort[r])
+        else:
+            sorted_roots = sorted(roots)
+            r0 = sorted_roots[0]
+            merged_targets = group_targets[r0]
+            merged_stmts = group_stmts[r0]
+            orders = group_orders[r0]
+            if orders is None:
+                orders = [r0]
+            group_targets[r0] = None
+            group_stmts[r0] = None
+            group_orders[r0] = None
+            parent[r0] = gid
+            for r in sorted_roots[1:]:
+                merged_targets |= group_targets[r]
+                merged_stmts.extend(group_stmts[r])
+                ro = group_orders[r]
+                if ro is None:
+                    orders.append(r)
+                else:
+                    orders.extend(ro)
+                group_targets[r] = None
+                group_stmts[r] = None
+                group_orders[r] = None
+                parent[r] = gid
+            merged_targets |= targets
+            for t in targets:
+                target_owner[t] = gid
+            merged_stmts.append(stmt)
+            orders.append(gid)
+            parent.append(gid)
+            group_targets.append(merged_targets)
+            group_stmts.append(merged_stmts)
+            group_orders.append(orders)
+            needs_sort.append(True)
+
+    result = []
+    for targets, stmts, orders, ns in zip(group_targets, group_stmts, group_orders, needs_sort):
+        if stmts is None:
+            continue
+        if ns:
+            stmts = [s for _, s in sorted(zip(orders, stmts), key=lambda x: x[0])]
+        result.append((targets, stmts))
+    return result
 
 
 def list_special_ios(f, ins, outs, inouts):
@@ -172,19 +251,25 @@ class _Lowerer(NodeTransformer):
         self.comb = []
 
     def visit_Assign(self, node):
-        old_target_context, old_extra_stmts = self.target_context, self.extra_stmts
-        self.extra_stmts = []
+        old_target_context = self.target_context
+        old_extra_stmts = self.extra_stmts
+        if old_extra_stmts:
+            self.extra_stmts = []
 
         self.target_context = True
         lhs = self.visit(node.l)
         self.target_context = False
         rhs = self.visit(node.r)
-        r = _Assign(lhs, rhs)
-        if self.extra_stmts:
-            r = [r] + self.extra_stmts
-
-        self.target_context, self.extra_stmts = old_target_context, old_extra_stmts
-        return r
+        extra = self.extra_stmts
+        self.target_context = old_target_context
+        if extra:
+            self.extra_stmts = old_extra_stmts if old_extra_stmts is not extra else []
+            return [_Assign(lhs, rhs)] + extra
+        if old_extra_stmts:
+            self.extra_stmts = old_extra_stmts
+        if lhs is node.l and rhs is node.r:
+            return node
+        return _Assign(lhs, rhs)
 
 
 # Basics are FHDL structure elements that back-ends are not required to support
@@ -264,21 +349,33 @@ class _ComplexPartLowerer(_Lowerer):
         return NodeTransformer.visit_Part(self, node)
 
 def _apply_lowerer(l, f):
+    orig_comb = f.comb
     f = l.visit(f)
-    f.comb += l.comb
+    if l.comb:
+        if f.comb is orig_comb:
+            f = copy(f)
+            f.comb = f.comb + l.comb
+        else:
+            f.comb += l.comb
 
-    for special in sorted(f.specials, key=lambda s: s.duid):
-        for obj, attr, direction in special.iter_expressions():
-            if direction != SPECIAL_INOUT:
-                # inouts are only supported by Migen when connected directly to top-level
-                # in this case, they are Signal and never need lowering
-                l.comb = []
-                l.target_context = direction != SPECIAL_INPUT
-                l.extra_stmts = []
-                expr = getattr(obj, attr)
-                expr = l.visit(expr)
-                setattr(obj, attr, expr)
-                f.comb += l.comb + l.extra_stmts
+    if f.specials:
+        for special in sorted(f.specials, key=lambda s: s.duid):
+            for obj, attr, direction in special.iter_expressions():
+                if direction != SPECIAL_INOUT:
+                    # inouts are only supported by Migen when connected directly to top-level
+                    # in this case, they are Signal and never need lowering
+                    l.comb = []
+                    l.target_context = direction != SPECIAL_INPUT
+                    l.extra_stmts = []
+                    expr = getattr(obj, attr)
+                    expr = l.visit(expr)
+                    setattr(obj, attr, expr)
+                    if l.comb or l.extra_stmts:
+                        if f.comb is orig_comb:
+                            f = copy(f)
+                            f.comb = f.comb + l.comb + l.extra_stmts
+                        else:
+                            f.comb += l.comb + l.extra_stmts
 
     return f
 
@@ -353,6 +450,8 @@ def _lower_specials_step(overrides, specials):
 
 
 def lower_specials(overrides, f):
+    if not f.specials:
+        return f, set()
     lowered_specials = set()
     while True:
         fs, lowered_specials_step = _lower_specials_step(overrides, f.specials)

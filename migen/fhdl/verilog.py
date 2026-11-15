@@ -33,14 +33,10 @@ _reserved_keywords = {
 
 
 def _printsig(ns, s):
-    if s.signed:
-        n = "signed "
-    else:
-        n = ""
-    if len(s) > 1:
-        n += "[" + str(len(s)-1) + ":0] "
-    n += ns.get_name(s)
-    return n
+    n = "signed " if s.signed else ""
+    if s.nbits > 1:
+        n += "[" + str(s.nbits-1) + ":0] "
+    return n + ns.get_name(s)
 
 
 def _printconstant(node):
@@ -52,11 +48,12 @@ def _printconstant(node):
 
 
 def _printexpr(ns, node):
-    if isinstance(node, Constant):
-        return _printconstant(node)
-    elif isinstance(node, Signal):
+    cls = type(node)
+    if cls is Signal:
         return ns.get_name(node), node.signed
-    elif isinstance(node, _Operator):
+    elif cls is Constant:
+        return _printconstant(node)
+    elif cls is _Operator or isinstance(node, _Operator):
         arity = len(node.operands)
         r1, s1 = _printexpr(ns, node.operands[0])
         if arity == 1:
@@ -71,7 +68,7 @@ def _printexpr(ns, node):
                 s = s1
         elif arity == 2:
             r2, s2 = _printexpr(ns, node.operands[1])
-            if node.op not in ["<<<", ">>>"]:
+            if node.op not in ("<<<", ">>>"):
                 if s2 and not s1:
                     r1 = "$signed({1'd0, " + r1 + "})"
                 if s1 and not s2:
@@ -91,10 +88,10 @@ def _printexpr(ns, node):
         else:
             raise TypeError
         return "(" + r + ")", s
-    elif isinstance(node, _Slice):
+    elif cls is _Slice or isinstance(node, _Slice):
         # Verilog does not like us slicing non-array signals...
         if isinstance(node.value, Signal) \
-          and len(node.value) == 1 \
+          and node.value.nbits == 1 \
           and node.start == 0 and node.stop == 1:
               return _printexpr(ns, node.value)
 
@@ -104,15 +101,19 @@ def _printexpr(ns, node):
             sr = "[" + str(node.stop-1) + ":" + str(node.start) + "]"
         r, s = _printexpr(ns, node.value)
         return r + sr, s
-    elif isinstance(node, _Part):
+    elif cls is _Part or isinstance(node, _Part):
         sr = "[" + _printexpr(ns, node.offset)[0] + "+:" + str(node.width) + "]"
         r, s = _printexpr(ns, node.value)
         return r + sr, s
-    elif isinstance(node, Cat):
+    elif cls is Cat or isinstance(node, Cat):
         l = [_printexpr(ns, v)[0] for v in reversed(node.l)]
         return "{" + ", ".join(l) + "}", False
-    elif isinstance(node, Replicate):
+    elif cls is Replicate or isinstance(node, Replicate):
         return "{" + str(node.n) + "{" + _printexpr(ns, node.v)[0] + "}}", False
+    elif isinstance(node, Constant):
+        return _printconstant(node)
+    elif isinstance(node, Signal):
+        return ns.get_name(node), node.signed
     else:
         raise TypeError("Expression of unrecognized type: '{}'".format(type(node).__name__))
 
@@ -121,7 +122,8 @@ def _printexpr(ns, node):
 
 
 def _printnode(ns, at, level, node):
-    if isinstance(node, _Assign):
+    cls = type(node)
+    if cls is _Assign or isinstance(node, _Assign):
         if at == _AT_BLOCKING:
             assignment = " = "
         elif at == _AT_NONBLOCKING:
@@ -131,9 +133,9 @@ def _printnode(ns, at, level, node):
         else:
             assignment = " <= "
         return "\t"*level + _printexpr(ns, node.l)[0] + assignment + _printexpr(ns, node.r)[0] + ";\n"
-    elif isinstance(node, collections.abc.Iterable):
-        return "".join(list(map(partial(_printnode, ns, at, level), node)))
-    elif isinstance(node, If):
+    elif cls is list or cls is tuple or isinstance(node, collections.abc.Iterable):
+        return "".join([_printnode(ns, at, level, s) for s in node])
+    elif cls is If or isinstance(node, If):
         r = "\t"*level + "if (" + _printexpr(ns, node.cond)[0] + ") begin\n"
         r += _printnode(ns, at, level + 1, node.t)
         if node.f:
@@ -141,21 +143,23 @@ def _printnode(ns, at, level, node):
             r += _printnode(ns, at, level + 1, node.f)
         r += "\t"*level + "end\n"
         return r
-    elif isinstance(node, Case):
+    elif cls is Case or isinstance(node, Case):
         if node.cases:
-            r = "\t"*level + "case (" + _printexpr(ns, node.test)[0] + ")\n"
+            chunks = ["\t"*level + "case (" + _printexpr(ns, node.test)[0] + ")\n"]
             css = [(k, v) for k, v in node.cases.items() if isinstance(k, Constant)]
-            css = sorted(css, key=lambda x: x[0].value)
+            css.sort(key=lambda x: x[0].value)
+            tab1 = "\t"*(level + 1)
+            end_branch = tab1 + "end\n"
             for choice, statements in css:
-                r += "\t"*(level + 1) + _printexpr(ns, choice)[0] + ": begin\n"
-                r += _printnode(ns, at, level + 2, statements)
-                r += "\t"*(level + 1) + "end\n"
+                chunks.append(tab1 + _printexpr(ns, choice)[0] + ": begin\n")
+                chunks.append(_printnode(ns, at, level + 2, statements))
+                chunks.append(end_branch)
             if "default" in node.cases:
-                r += "\t"*(level + 1) + "default: begin\n"
-                r += _printnode(ns, at, level + 2, node.cases["default"])
-                r += "\t"*(level + 1) + "end\n"
-            r += "\t"*level + "endcase\n"
-            return r
+                chunks.append(tab1 + "default: begin\n")
+                chunks.append(_printnode(ns, at, level + 2, node.cases["default"]))
+                chunks.append(end_branch)
+            chunks.append("\t"*level + "endcase\n")
+            return "".join(chunks)
         else:
             return ""
     elif isinstance(node, Display):
@@ -173,15 +177,18 @@ def _printnode(ns, at, level, node):
         raise TypeError("Node of unrecognized type: "+str(type(node)))
 
 
-def _list_comb_wires_regs(f):
+def _list_comb_wires_regs_groups(groups):
     w, r = set(), set()
-    groups = group_by_targets(f.comb)
     for g in groups:
         if len(g[1]) == 1 and isinstance(g[1][0], _Assign):
             w |= g[0]
         else:
             r |= g[0]
     return w, r
+
+
+def _list_comb_wires_regs(f):
+    return _list_comb_wires_regs_groups(group_by_targets(f.comb))
 
 
 def _printattr(attr, attr_translate):
@@ -208,85 +215,90 @@ def _printattr(attr, attr_translate):
     return r
 
 
-def _printheader(f, ios, name, ns, attr_translate):
-    sigs = list_signals(f) | list_special_ios(f, True, True, True)
+def _printheader(f, ios, name, ns, attr_translate, sigs=None, comb_groups=None):
+    if sigs is None:
+        sigs = list_signals(f) | list_special_ios(f, True, True, True)
+    if comb_groups is None:
+        comb_groups = group_by_targets(f.comb) if f.comb else []
     special_outs = list_special_ios(f, False, True, True)
     inouts = list_special_ios(f, False, False, True)
-    targets = list_targets(f) | special_outs
-    wires, comb_regs = _list_comb_wires_regs(f)
+    wires, comb_regs = _list_comb_wires_regs_groups(comb_groups)
+    targets = list_targets(f.sync) | wires | comb_regs | special_outs
     wires |= special_outs
-    r = "module " + name + "(\n"
+    chunks = ["module " + name + "(\n"]
     firstp = True
     for sig in sorted(ios, key=lambda x: x.duid):
         if not firstp:
-            r += ",\n"
+            chunks.append(",\n")
         firstp = False
         attr = _printattr(sig.attr, attr_translate)
         if attr:
-            r += "\t" + attr
+            chunks.append("\t" + attr)
         if sig in inouts:
-            r += "\tinout " + _printsig(ns, sig)
+            chunks.append("\tinout " + _printsig(ns, sig))
         elif sig in targets:
             if sig in wires:
-                r += "\toutput " + _printsig(ns, sig)
+                chunks.append("\toutput " + _printsig(ns, sig))
             else:
-                r += "\toutput reg " + _printsig(ns, sig)
+                chunks.append("\toutput reg " + _printsig(ns, sig))
         else:
-            r += "\tinput " + _printsig(ns, sig)
-    r += "\n);\n\n"
+            chunks.append("\tinput " + _printsig(ns, sig))
+    chunks.append("\n);\n\n")
     for sig in sorted(sigs - ios, key=lambda x: x.duid):
         attr = _printattr(sig.attr, attr_translate)
         if attr:
-            r += attr + " "
+            chunks.append(attr + " ")
         if sig in wires:
-            r += "wire " + _printsig(ns, sig) + ";\n"
+            chunks.append("wire " + _printsig(ns, sig) + ";\n")
         else:
             if sig not in comb_regs:
-                r += "reg " + _printsig(ns, sig) + " = " + _printexpr(ns, sig.reset)[0] + ";\n"
+                chunks.append("reg " + _printsig(ns, sig) + " = " + _printexpr(ns, sig.reset)[0] + ";\n")
             else:
-                r += "reg " + _printsig(ns, sig) + ";\n"
-    r += "\n"
-    return r
+                chunks.append("reg " + _printsig(ns, sig) + ";\n")
+    chunks.append("\n")
+    return "".join(chunks)
 
 
-def _printcomb(f, ns, display_run):
-    r = ""
-    if f.comb:
-        # Add a dummy event (using a dummy signal 'dummy_s') to get the simulator
-        # to run the combinatorial process once at the beginning.
-        syn_off = "// synthesis translate_off\n"
-        syn_on = "// synthesis translate_on\n"
-        dummy_s = Signal(name_override="dummy_s")
-        r += syn_off
-        r += "reg " + _printsig(ns, dummy_s) + ";\n"
-        r += "initial " + ns.get_name(dummy_s) + " <= 1'd0;\n"
-        r += syn_on
-        r += "\n"
-
+def _printcomb(f, ns, display_run, groups=None):
+    if not f.comb:
+        return "\n"
+    # Add a dummy event (using a dummy signal 'dummy_s') to get the simulator
+    # to run the combinatorial process once at the beginning.
+    syn_off = "// synthesis translate_off\n"
+    syn_on = "// synthesis translate_on\n"
+    dummy_s = Signal(name_override="dummy_s")
+    chunks = [
+        syn_off,
+        "reg " + _printsig(ns, dummy_s) + ";\n",
+        "initial " + ns.get_name(dummy_s) + " <= 1'd0;\n",
+        syn_on,
+        "\n",
+    ]
+    if groups is None:
         groups = group_by_targets(f.comb)
 
-        for n, g in enumerate(groups):
-            if len(g[1]) == 1 and isinstance(g[1][0], _Assign):
-                r += "assign " + _printnode(ns, _AT_BLOCKING, 0, g[1][0])
-            else:
-                dummy_d = Signal(name_override="dummy_d")
-                r += "\n" + syn_off
-                r += "reg " + _printsig(ns, dummy_d) + ";\n"
-                r += syn_on
+    for n, g in enumerate(groups):
+        if len(g[1]) == 1 and isinstance(g[1][0], _Assign):
+            chunks.append("assign " + _printnode(ns, _AT_BLOCKING, 0, g[1][0]))
+        else:
+            dummy_d = Signal(name_override="dummy_d")
+            chunks.append("\n" + syn_off)
+            chunks.append("reg " + _printsig(ns, dummy_d) + ";\n")
+            chunks.append(syn_on)
 
-                r += "always @(*) begin\n"
-                if display_run:
-                    r += "\t$display(\"Running comb block #" + str(n) + "\");\n"
-                for t in sorted(g[0], key=lambda x: x.duid):
-                    r += "\t" + ns.get_name(t) + " <= " + _printexpr(ns, t.reset)[0] + ";\n"
-                r += _printnode(ns, _AT_NONBLOCKING, 1, g[1])
+            chunks.append("always @(*) begin\n")
+            if display_run:
+                chunks.append("\t$display(\"Running comb block #" + str(n) + "\");\n")
+            for t in sorted(g[0], key=lambda x: x.duid):
+                chunks.append("\t" + ns.get_name(t) + " <= " + _printexpr(ns, t.reset)[0] + ";\n")
+            chunks.append(_printnode(ns, _AT_NONBLOCKING, 1, g[1]))
 
-                r += syn_off
-                r += "\t" + ns.get_name(dummy_d) + " <= " + ns.get_name(dummy_s) + ";\n"
-                r += syn_on
-                r += "end\n"
-    r += "\n"
-    return r
+            chunks.append(syn_off)
+            chunks.append("\t" + ns.get_name(dummy_d) + " <= " + ns.get_name(dummy_s) + ";\n")
+            chunks.append(syn_on)
+            chunks.append("end\n")
+    chunks.append("\n")
+    return "".join(chunks)
 
 
 def _printsync(f, ns):
@@ -349,26 +361,30 @@ def convert(fi, ios=None, name="top",
     insert_resets(f)
     f = lower_basics(f)
     f, lowered_specials = lower_specials(special_overrides, f)
-    f = lower_basics(f)
+    if lowered_specials:
+        f = lower_basics(f)
 
     for io in sorted(ios, key=lambda x: x.duid):
         if io.name_override is None:
             io_name = io.backtrace[-1][0]
             if io_name:
                 io.name_override = io_name
-    ns = build_namespace(list_signals(f) \
-        | list_special_ios(f, True, True, True) \
-        | ios, _reserved_keywords)
+    sigs = list_signals(f) | list_special_ios(f, True, True, True)
+    ns = build_namespace(sigs | ios, _reserved_keywords)
     ns.clock_domains = f.clock_domains
     r.ns = ns
 
-    src = "/* Machine-generated using Migen */\n"
-    src += _printheader(f, ios, name, ns, attr_translate)
-    src += _printcomb(f, ns, display_run=display_run)
-    src += _printsync(f, ns)
-    src += _printspecials(special_overrides, f.specials - lowered_specials,
-        ns, r.add_data_file, attr_translate)
-    src += "endmodule\n"
+    comb_groups = group_by_targets(f.comb) if f.comb else []
+    src = "".join([
+        "/* Machine-generated using Migen */\n",
+        _printheader(f, ios, name, ns, attr_translate,
+                     sigs=sigs, comb_groups=comb_groups),
+        _printcomb(f, ns, display_run=display_run, groups=comb_groups),
+        _printsync(f, ns),
+        _printspecials(special_overrides, f.specials - lowered_specials,
+            ns, r.add_data_file, attr_translate),
+        "endmodule\n",
+    ])
     r.set_main_source(src)
 
     return r

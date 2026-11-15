@@ -1,15 +1,16 @@
-from collections import OrderedDict
-
 from migen.fhdl.structure import *
 
 
 class _Node:
+    __slots__ = ("signal_count", "numbers", "use_name", "use_number",
+                 "children", "_sorted_numbers", "_number_index")
+
     def __init__(self):
         self.signal_count = 0
         self.numbers = set()
         self.use_name = False
         self.use_number = False
-        self.children = OrderedDict()
+        self.children = {}
         self._sorted_numbers = None
         self._number_index = None
 
@@ -43,65 +44,94 @@ def _display_tree(filename, tree):
 
 def _build_tree(signals, basic_tree=None):
     root = _Node()
-    for signal in signals:
-        current_b = basic_tree
-        current = root
-        current.signal_count += 1
-        for name, number in signal.backtrace:
-            if basic_tree is None:
-                use_number = False
-            else:
+    if basic_tree is None:
+        for signal in signals:
+            current = root
+            current.signal_count += 1
+            for name, number in signal.backtrace:
+                children = current.children
+                child = children.get(name)
+                if child is None:
+                    child = _Node()
+                    children[name] = child
+                current = child
+                current.numbers.add(number)
+                current.signal_count += 1
+    else:
+        for signal in signals:
+            current_b = basic_tree
+            current = root
+            current.signal_count += 1
+            for name, number in signal.backtrace:
                 current_b = current_b.children[name]
                 use_number = current_b.use_number
-            if use_number:
-                key = (name, number)
-            else:
-                key = name
-            try:
-                current = current.children[key]
-            except KeyError:
-                new = _Node()
-                current.children[key] = new
-                current = new
-            current.numbers.add(number)
-            if use_number:
-                current.all_numbers = current_b.sorted_numbers()
-                idxmap = current_b._number_index
-                if idxmap is None:
-                    idxmap = current_b._number_index = dict(
-                        (n, i) for i, n in enumerate(current.all_numbers))
-                current._number_index = idxmap
-            current.signal_count += 1
+                key = (name, number) if use_number else name
+                children = current.children
+                child = children.get(key)
+                if child is None:
+                    child = _Node()
+                    if use_number:
+                        idxmap = current_b._number_index
+                        if idxmap is None:
+                            idxmap = current_b._number_index = {
+                                n: i for i, n in enumerate(current_b.sorted_numbers())}
+                        child._number_index = idxmap
+                    children[key] = child
+                current = child
+                if _debug:
+                    current.numbers.add(number)
+                current.signal_count += 1
     return root
 
 
 def _set_use_name(node, node_name=""):
-    cnames = [(k, _set_use_name(v, k)) for k, v in node.children.items()]
+    children = node.children
+    n_children = len(children)
+    if n_children == 0:
+        if node.signal_count > 0:
+            node.use_name = True
+            return {(node_name, )}
+        return set()
+    if n_children == 1:
+        c_prefix, child = next(iter(children.items()))
+        c_names = _set_use_name(child, c_prefix)
+        if child.use_name:
+            r = {(c_prefix, ) + c_name for c_name in c_names}
+        else:
+            r = c_names
+        if node.signal_count > child.signal_count:
+            node.use_name = True
+            r.add((node_name, ))
+        return r
+
+    cnames = [(k, _set_use_name(v, k)) for k, v in children.items()]
     # A child needs its name qualified if its subtree shares any leaf
     # name with another child. Finding shared leaves via a single map
     # is linear in total leaf count instead of quadratic in children.
-    owners = dict()
+    owners = {}
     for prefix, names in cnames:
         for name in names:
-            try:
-                lst = owners[name]
-            except KeyError:
+            lst = owners.get(name)
+            if lst is None:
                 owners[name] = [prefix]
             else:
                 lst.append(prefix)
     for prefixes in owners.values():
         if len(prefixes) > 1:
             for prefix in prefixes:
-                node.children[prefix].use_name = True
+                children[prefix].use_name = True
     r = set()
+    child_sig_sum = 0
     for c_prefix, c_names in cnames:
-        if node.children[c_prefix].use_name:
+        child = children[c_prefix]
+        child_sig_sum += child.signal_count
+        if child.use_name:
             for c_name in c_names:
                 r.add((c_prefix, ) + c_name)
         else:
             r |= c_names
 
-    if node.signal_count > sum(c.signal_count for c in node.children.values()):
+    if node.signal_count > child_sig_sum:
         node.use_name = True
         r.add((node_name, ))
 
@@ -112,29 +142,31 @@ def _name_signal(tree, signal):
     elements = []
     treepos = tree
     for step_name, step_n in signal.backtrace:
-        try:
-            treepos = treepos.children[(step_name, step_n)]
-            use_number = True
-        except KeyError:
-            treepos = treepos.children[step_name]
-            use_number = False
-        if treepos.use_name:
-            elname = step_name
-            if use_number:
-                elname += str(treepos._number_index[step_n])
-            elements.append(elname)
+        children = treepos.children
+        child = children.get(step_name)
+        if child is not None:
+            treepos = child
+            if treepos.use_name:
+                elements.append(step_name)
+        else:
+            treepos = children[(step_name, step_n)]
+            if treepos.use_name:
+                elements.append(step_name + str(treepos._number_index[step_n]))
     return "_".join(elements)
 
 
 def _build_pnd_from_tree(tree, signals):
-    return dict((signal, _name_signal(tree, signal)) for signal in signals)
+    return {signal: _name_signal(tree, signal) for signal in signals}
 
 
 def _invert_pnd(pnd):
-    inv_pnd = dict()
+    inv_pnd = {}
     for k, v in pnd.items():
-        inv_pnd[v] = inv_pnd.get(v, [])
-        inv_pnd[v].append(k)
+        lst = inv_pnd.get(v)
+        if lst is None:
+            inv_pnd[v] = [k]
+        else:
+            lst.append(k)
     return inv_pnd
 
 
@@ -195,9 +227,15 @@ def _build_pnd_for_group(group_n, signals):
     return pnd
 
 
+def _is_traced(signal):
+    return getattr(signal, "_traced", True) or signal.name_override is None
+
+
 def _build_signal_groups(signals):
     r = []
     for signal in signals:
+        if not _is_traced(signal):
+            continue
         # build chain of related signals
         related_list = []
         cur_signal = signal
@@ -208,7 +246,8 @@ def _build_signal_groups(signals):
         for _ in range(len(related_list) - len(r)):
             r.append(set())
         for target_set, source_signal in zip(r, related_list):
-            target_set.add(source_signal)
+            if _is_traced(source_signal):
+                target_set.add(source_signal)
     # with the algorithm above and a list of all signals,
     # a signal appears in all groups of a lower number than its.
     # make signals appear only in their group of highest number.
@@ -217,9 +256,12 @@ def _build_signal_groups(signals):
     return r
 
 
-def _build_pnd(signals):
+def _build_pnd(signals, override_names=None):
+    if override_names is None:
+        override_names = {}
     groups = _build_signal_groups(signals)
-    gpnds = [_build_pnd_for_group(n, gsignals) for n, gsignals in enumerate(groups)]
+    gpnds = [_build_pnd_for_group(n, gsignals) if gsignals else {}
+             for n, gsignals in enumerate(groups)]
 
     pnd = dict()
     for gn, gpnd in enumerate(gpnds):
@@ -230,19 +272,24 @@ def _build_pnd(signals):
             while cur_signal.related is not None:
                 cur_signal = cur_signal.related
                 cur_gn -= 1
-                result = gpnds[cur_gn][cur_signal] + "_" + result
+                if cur_signal in gpnds[cur_gn]:
+                    parent_name = gpnds[cur_gn][cur_signal]
+                else:
+                    parent_name = override_names.get(cur_signal, cur_signal.name_override)
+                result = parent_name + "_" + result
             pnd[signal] = result
 
     return pnd
 
 
 def build_namespace(signals, reserved_keywords=set()):
-    pnd = _build_pnd(signals)
-    ns = Namespace(pnd, reserved_keywords)
+    ns = Namespace({}, reserved_keywords)
     # register signals with name_override
     swno = {signal for signal in signals if signal.name_override is not None}
+    override_names = {}
     for signal in sorted(swno, key=lambda x: x.duid):
-        ns.get_name(signal)
+        override_names[signal] = ns.get_name(signal)
+    ns.pnd = _build_pnd(signals, override_names)
     return ns
 
 
@@ -250,32 +297,33 @@ class Namespace:
     def __init__(self, pnd, reserved_keywords=set()):
         self.counts = {k: 1 for k in reserved_keywords}
         self.sigs = {}
+        self._names = {}
         self.pnd = pnd
         self.clock_domains = dict()
 
     def get_name(self, sig):
-        if isinstance(sig, ClockSignal):
-            sig = self.clock_domains[sig.cd].clk
-        if isinstance(sig, ResetSignal):
-            sig = self.clock_domains[sig.cd].rst
-            if sig is None:
-                raise ValueError("Attempted to obtain name of non-existent "
-                                 "reset signal of domain "+sig.cd)
+        if type(sig) is not Signal:
+            if isinstance(sig, ClockSignal):
+                sig = self.clock_domains[sig.cd].clk
+            elif isinstance(sig, ResetSignal):
+                rst = self.clock_domains[sig.cd].rst
+                if rst is None:
+                    raise ValueError("Attempted to obtain name of non-existent "
+                                     "reset signal of domain "+sig.cd)
+                sig = rst
+        res = self._names.get(sig)
+        if res is not None:
+            return res
 
         if sig.name_override is not None:
             sig_name = sig.name_override
         else:
             sig_name = self.pnd[sig]
-        try:
-            n = self.sigs[sig]
-        except KeyError:
-            try:
-                n = self.counts[sig_name]
-            except KeyError:
-                n = 0
+        n = self.sigs.get(sig)
+        if n is None:
+            n = self.counts.get(sig_name, 0)
             self.sigs[sig] = n
             self.counts[sig_name] = n + 1
-        if n:
-            return sig_name + "_" + str(n)
-        else:
-            return sig_name
+        res = sig_name + "_" + str(n) if n else sig_name
+        self._names[sig] = res
+        return res

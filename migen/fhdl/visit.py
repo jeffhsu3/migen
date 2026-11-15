@@ -34,34 +34,34 @@ _transformer_dispatch = _make_dispatch(_transformer_classes)
 
 
 class NodeVisitor:
-    # {exact node type: method name}; None entries mean the node is
-    # dispatched dynamically (list/tuple/dict/unknown). Subclasses of
-    # registered types resolve to their base's handler via the MRO.
+    # {exact node type: unbound handler}; populated lazily per visitor class.
+    # Subclasses of registered types resolve to their base's handler via MRO.
     _dispatch_table = _visitor_dispatch
-    _resolved = {}
+    _method_cache = {}
 
-    def _resolve(self, cls):
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        cls._method_cache = {}
+
+    def _resolve_method(self, cls):
+        vcls = self.__class__
         for k in cls.__mro__:
-            try:
-                return self._dispatch_table[k]
-            except KeyError:
-                pass
-        return None
+            method_name = self._dispatch_table.get(k)
+            if method_name is not None:
+                return getattr(vcls, method_name)
+        if issubclass(cls, (list, tuple)):
+            return vcls.visit_statements
+        if issubclass(cls, dict):
+            return vcls.visit_clock_domains
+        return vcls.visit_unknown
 
     def visit(self, node):
         cls = node.__class__
         try:
-            method_name = self._resolved[cls]
+            fn = self._method_cache[cls]
         except KeyError:
-            method_name = self._resolved[cls] = self._resolve(cls)
-        if method_name is not None:
-            return getattr(self, method_name)(node)
-        if isinstance(node, (list, tuple)):
-            return self.visit_statements(node)
-        elif isinstance(node, dict):
-            return self.visit_clock_domains(node)
-        else:
-            return self.visit_unknown(node)
+            fn = self._method_cache[cls] = self._resolve_method(cls)
+        return fn(self, node)
 
     def visit_Constant(self, node):
         pass
@@ -76,8 +76,16 @@ class NodeVisitor:
         pass
 
     def visit_Operator(self, node):
-        for o in node.operands:
-            self.visit(o)
+        operands = node.operands
+        n = len(operands)
+        if n == 2:
+            self.visit(operands[0])
+            self.visit(operands[1])
+        elif n == 1:
+            self.visit(operands[0])
+        else:
+            for o in operands:
+                self.visit(o)
 
     def visit_Slice(self, node):
         self.visit(node.value)
@@ -139,9 +147,6 @@ class NodeVisitor:
 # are returned as-is instead of being rebuilt.
 class NodeTransformer(NodeVisitor):
     _dispatch_table = _transformer_dispatch
-    # NB: separate resolution cache - the two dispatch tables differ
-    # (e.g. _Part)
-    _resolved = {}
 
     def visit_Constant(self, node):
         return node
@@ -157,6 +162,21 @@ class NodeTransformer(NodeVisitor):
 
     def visit_Operator(self, node):
         operands = node.operands
+        n = len(operands)
+        if n == 2:
+            o0, o1 = operands
+            new_operands = self.visit(o0)
+            n0 = new_operands
+            new_operands = self.visit(o1)
+            if n0 is o0 and new_operands is o1:
+                return node
+            return _Operator(node.op, [n0, new_operands])
+        if n == 1:
+            o0 = operands[0]
+            new_operands = self.visit(o0)
+            if new_operands is o0:
+                return node
+            return _Operator(node.op, [new_operands])
         new_operands = [self.visit(o) for o in operands]
         for old, new in zip(operands, new_operands):
             if old is not new:
@@ -234,11 +254,22 @@ class NodeTransformer(NodeVisitor):
     # NOTE: this will always return a list, even if node is a tuple
     def visit_statements(self, node):
         if type(node) is not list:
-            return [self.visit(statement) for statement in node]
-        new_node = [self.visit(statement) for statement in node]
-        for old, new in zip(node, new_node):
-            if old is not new:
-                return new_node
+            new_node = [self.visit(statement) for statement in node]
+            return new_node
+        if not node:
+            return node
+        # Assign self.visit() results to `new_node` so tracer.get_var_name
+        # sees the same local name across all statements when lowerers create
+        # proxy Signals inside visit().
+        for i, statement in enumerate(node):
+            new_node = self.visit(statement)
+            if new_node is not statement:
+                res = node[:i]
+                res.append(new_node)
+                for rest in node[i + 1:]:
+                    new_node = self.visit(rest)
+                    res.append(new_node)
+                return res
         return node
 
     def visit_clock_domains(self, node):
